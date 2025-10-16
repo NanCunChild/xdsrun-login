@@ -6,9 +6,9 @@ before:
 
 builds:
   -
-    id: srun-login
+    id: xdsrun
     main: .
-    binary: srun-login
+    binary: xdsrun
     env:
       - CGO_ENABLED=0
     goos:
@@ -23,12 +23,7 @@ builds:
       - riscv64
       - loong64
     goarm:
-      - "7" # 只为 goarch: arm 编译 ARMv7
-    ignore:
-      - goos: windows
-        goarch: arm
-      - goos: darwin
-        goarch: arm
+      - "7"
 
 archives:
   - 
@@ -50,3 +45,5 @@ changelog:
     exclude:
       - '^docs:'
       - '^test:'
+      - 'Merge pull request'
+      - 'Merge branch'
