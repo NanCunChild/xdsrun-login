@@ -2,9 +2,11 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -33,20 +35,21 @@ var servers = []string{"https://w.xidian.edu.cn", "https://10.255.44.33"}
 // ================================================================================= //
 
 func main() {
-	// 定义命令行标志
 	usernameFlag := flag.String("u", "", "您的账号 (学号)")
 	passwordFlag := flag.String("p", "", "您的校园网密码")
 	domainFlag := flag.String("d", "", "运营商后缀, 如 @dx, @lt, @yd (默认为校园网)")
 	statusFlag := flag.Bool("s", false, "查询在线状态 (此模式下无需-u和-p)")
+	timeoutFlag := flag.Int("to", 10, "超时时间(秒)") // 考虑是否需要
 	flag.Parse()
 
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-	}
+	client := createClient(true)
 
-	// 根据 -s 标志决定执行哪个流程
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutFlag)*time.Second)
+	defer cancel()
+
+	// 如果带有 -s 参数，则执行状态查询
 	if *statusFlag {
-		checkStatus(client)
+		checkStatus(ctx, client)
 	} else {
 		// 检查登录模式下参数是否完整
 		if *usernameFlag == "" || *passwordFlag == "" {
@@ -54,7 +57,19 @@ func main() {
 			fmt.Println("用法示例: ./xdsrun -u 你的学号 -p '你的密码'")
 			os.Exit(1)
 		}
-		performLogin(client, *usernameFlag, *passwordFlag, *domainFlag)
+		performLogin(ctx, client, *usernameFlag, *passwordFlag, *domainFlag)
+	}
+}
+
+func createClient(skipVerify bool) *http.Client {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: skipVerify,
+		},
+	}
+	return &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: transport,
 	}
 }
 
@@ -63,53 +78,68 @@ func main() {
 // ================================================================================= //
 
 // performLogin 执行完整的登录流程
-func performLogin(client *http.Client, username, password, domain string) {
+func performLogin(ctx context.Context, client *http.Client, username, password, domain string) {
 	fullUsername := username + domain
-	var success bool
+	type result struct {
+		host   string
+		userIP string
+		err    error
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	results := make(chan result, len(servers))
 
 	for _, host := range servers {
-		fmt.Printf("正在尝试连接服务器: %s ...\n", host)
+		go func(host string) {
+			select {
+			case <-ctx.Done():
+				results <- result{host: host, err: ctx.Err()}
+				return
+			default:
+			}
 
-		userIP, err := getIpAddress(client, host)
-		if err != nil {
-			fmt.Printf("从 %s 获取IP失败: %v\n", host, err)
-			continue
-		}
-
-		token, err := getChallengeToken(client, host, userIP, fullUsername)
-		if err != nil {
-			fmt.Printf("从 %s 获取Token失败: %v\n", host, err)
-			continue
-		}
-
-		hmd5 := calculateHmacMD5(password, token)
-		info := encodeUserInfo(userIP, fullUsername, password, token)
-		chksum := calculateChecksum(token, userIP, hmd5, info, fullUsername)
-
-		err = finalLogin(client, host, userIP, hmd5, info, chksum, fullUsername)
-		if err != nil {
-			fmt.Printf("向 %s 发起登录失败: %v\n", host, err)
-			continue
-		}
-
-		// 只要有一个服务器成功，就标记并跳出循环
-		fmt.Printf("login to \"%s\" success! IP \"%s\" is now authorized!\n", host, userIP)
-		success = true
-		break
+			userIP, err := getIpAddress(ctx, client, host)
+			if err != nil {
+				results <- result{host: host, err: err}
+				return
+			}
+			token, err := getChallengeToken(ctx, client, host, userIP, fullUsername)
+			if err != nil {
+				results <- result{host: host, err: err}
+				return
+			}
+			hmd5 := calculateHmacMD5(password, token)
+			info := encodeUserInfo(userIP, fullUsername, password, token)
+			chksum := calculateChecksum(token, userIP, hmd5, info, fullUsername)
+			err = finalLogin(ctx, client, host, userIP, hmd5, info, chksum, fullUsername)
+			results <- result{host: host, userIP: userIP, err: err}
+		}(host)
 	}
 
-	if !success {
-		log.Fatal("错误: 所有服务器均尝试失败，请检查是否已正确连接到校园网。")
+	successFound := false
+	for i := 0; i < len(servers); i++ {
+		r := <-results
+		if r.err == nil && !successFound {
+			fmt.Printf("[OK] 登录到 %q 成功！ IP %q 目前已授权！\n", r.host, r.userIP)
+			cancel()
+			return
+		} else {
+			fmt.Printf("host %s failed: %v\n", r.host, r.err)
+		}
 	}
+
+	fmt.Println("错误: 所有服务器均尝试失败，请检查网络。")
 }
 
 // checkStatus 执行在线状态查询流程
-func checkStatus(client *http.Client) {
+func checkStatus(ctx context.Context, client *http.Client) {
 	var success bool
 	for _, host := range servers {
 		fmt.Printf("正在尝试连接服务器: %s ...\n", host)
 
-		userIP, err := getIpAddress(client, host)
+		userIP, err := getIpAddress(ctx, client, host)
 		if err != nil {
 			fmt.Printf("从 %s 获取IP失败: %v\n", host, err)
 			continue
@@ -119,7 +149,7 @@ func checkStatus(client *http.Client) {
 		callback := fmt.Sprintf("jQuery11240%d_%d", time.Now().Unix(), time.Now().UnixNano()%1000)
 		apiURL := fmt.Sprintf("%s/cgi-bin/rad_user_info?callback=%s&ip=%s&_=%d", host, callback, userIP, time.Now().UnixMilli())
 
-		respBody, err := makeRequest(client, apiURL)
+		respBody, err := makeRequest(ctx, client, apiURL)
 		if err != nil {
 			fmt.Printf("向 %s 查询状态失败: %v\n", host, err)
 			continue
@@ -161,8 +191,8 @@ func checkStatus(client *http.Client) {
 //                            核心认证与加密函数 (已验证)                            //
 // ================================================================================= //
 
-func getIpAddress(client *http.Client, host string) (string, error) {
-	body, err := makeRequest(client, host+"/srun_portal_pc?ac_id="+acID)
+func getIpAddress(ctx context.Context, client *http.Client, host string) (string, error) {
+	body, err := makeRequest(ctx, client, host+"/srun_portal_pc?ac_id="+acID)
 	if err != nil {
 		return "", err
 	}
@@ -174,10 +204,11 @@ func getIpAddress(client *http.Client, host string) (string, error) {
 	return matches[1], nil
 }
 
-func getChallengeToken(client *http.Client, host, userIP, fullUsername string) (string, error) {
+func getChallengeToken(ctx context.Context, client *http.Client, host, userIP, fullUsername string) (string, error) {
 	callback := fmt.Sprintf("jQuery11240%d_%d", time.Now().Unix(), time.Now().UnixNano()%1000)
-	apiURL := fmt.Sprintf("%s/cgi-bin/get_challenge?callback=%s&username=%s&ip=%s&_=%d", host, callback, url.QueryEscape(fullUsername), userIP, time.Now().UnixMilli())
-	body, err := makeRequest(client, apiURL)
+	apiURL := fmt.Sprintf("%s/cgi-bin/get_challenge?callback=%s&username=%s&ip=%s&_=%d",
+		host, callback, url.QueryEscape(fullUsername), userIP, time.Now().UnixMilli())
+	body, err := makeRequest(ctx, client, apiURL)
 	if err != nil {
 		return "", err
 	}
@@ -197,7 +228,7 @@ func getChallengeToken(client *http.Client, host, userIP, fullUsername string) (
 	return res.Challenge, nil
 }
 
-func finalLogin(client *http.Client, host, userIP, hmd5, info, chksum, fullUsername string) error {
+func finalLogin(ctx context.Context, client *http.Client, host, userIP, hmd5, info, chksum, fullUsername string) error {
 	params := url.Values{}
 	params.Set("callback", fmt.Sprintf("jQuery11240%d_%d", time.Now().Unix(), time.Now().UnixNano()%1000))
 	params.Set("action", "login")
@@ -215,7 +246,7 @@ func finalLogin(client *http.Client, host, userIP, hmd5, info, chksum, fullUsern
 	params.Set("_", fmt.Sprintf("%d", time.Now().UnixMilli()))
 
 	finalURL := host + "/cgi-bin/srun_portal?" + params.Encode()
-	body, err := makeRequest(client, finalURL)
+	body, err := makeRequest(ctx, client, finalURL)
 	if err != nil {
 		return err
 	}
@@ -329,8 +360,8 @@ func l(data []uint32) string {
 //                                    辅助工具函数                                     //
 // ================================================================================= //
 
-func makeRequest(client *http.Client, url string) ([]byte, error) {
-	req, err := http.NewRequest("GET", url, nil)
+func makeRequest(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -345,6 +376,5 @@ func makeRequest(client *http.Client, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("服务器返回非 200 状态码: %d", resp.StatusCode)
 	}
-
 	return io.ReadAll(resp.Body)
 }
