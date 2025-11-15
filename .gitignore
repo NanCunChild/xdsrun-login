@@ -1,4 +1,7 @@
 pac.txt
 login_test/
+build/
 
 .env
+
+*.exe
