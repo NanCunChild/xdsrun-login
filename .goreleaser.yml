@@ -12,27 +12,31 @@ builds:
     binary: xdsrun
     env:
       - CGO_ENABLED=0
-    goos:
-      - linux
-      - windows
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-      - arm
-      - mipsle
-      - riscv64
-      - loong64
-    goarm:
-      - "6"
-      - "7"
-    ignore:
-      - goos: darwin
-        goarch: arm
-      - goos: windows
-        goarch: arm
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.buildTime={{.Date}}
+    
+    targets:
+      - linux_amd64
+      - linux_arm64
+      - linux_arm_6
+      - linux_arm_7
+      - linux_mipsle
+      - linux_riscv64
+      - linux_loong64
+      - linux_ppc64le
+
+      - windows_386
+      - windows_amd64
+      - windows_arm64
+
+      - darwin_amd64       # Intel Mac
+      - darwin_arm64       # M Mac
+
+      - android_arm64
+      - android_arm_7
+
+      - freebsd_amd64
+      - freebsd_arm64
 
 archives:
   - 
@@ -70,6 +74,6 @@ changelog:
 release:
   github:
     owner: NanCunChild
-    name: xdsrun-login
+    name: xdsrun
   draft: false
   prerelease: auto
