@@ -71,8 +71,5 @@ changelog:
       - 'Merge branch'
 
 release:
-  github:
-    owner: NanCunChild
-    name: xdsrun
   draft: false
   prerelease: auto
