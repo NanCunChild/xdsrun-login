@@ -23,7 +23,15 @@ builds:
       - riscv64
       - loong64
     goarm:
+      - "6"
       - "7"
+    ignore:
+      - goos: darwin
+        goarch: arm
+      - goos: windows
+        goarch: arm
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.buildTime={{.Date}}
 
 archives:
   - 
@@ -36,6 +44,13 @@ archives:
 checksum:
   name_template: 'checksums.txt'
 
+upx:
+  -
+    enabled: true
+    goarch:
+      - amd64
+      - arm64
+
 snapshot:
   name_template: "{{ incpatch .Version }}-next"
 
@@ -47,3 +62,10 @@ changelog:
       - '^test:'
       - 'Merge pull request'
       - 'Merge branch'
+
+release:
+  github:
+    owner: NanCunChild
+    name: xdsrun-login
+  draft: false
+  prerelease: auto
