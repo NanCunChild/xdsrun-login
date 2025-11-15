@@ -16,6 +16,8 @@ builds:
       - linux
       - windows
       - darwin
+      - android
+      - freebsd
     goarch:
       - amd64
       - arm64
@@ -30,6 +32,12 @@ builds:
       - goos: darwin
         goarch: arm
       - goos: windows
+        goarch: arm
+      - goos: android
+        goarch: mipsle
+      - goos: android
+        goarch: loong64
+      - goos: freebsd
         goarch: arm
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.buildTime={{.Date}}
@@ -70,6 +78,6 @@ changelog:
 release:
   github:
     owner: NanCunChild
-    name: xdsrun-login
+    name: xdsrun
   draft: false
   prerelease: auto

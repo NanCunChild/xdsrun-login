@@ -126,7 +126,7 @@ func performLogin(ctx context.Context, client *http.Client, username, password, 
 			cancel()
 			return
 		} else {
-			fmt.Printf("host %s failed: %v\n", r.host, r.err)
+			fmt.Printf("验证服务器 %s 失败: %v\n", r.host, r.err)
 		}
 	}
 
