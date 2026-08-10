@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/hmac"
 	"crypto/md5"
@@ -25,11 +26,12 @@ import (
 )
 
 const (
-	acID           = "8"
-	customB64ABC   = "LVoJPiCN2R8G90yg+hmFHuacZ1OWMnrsSTXkYpUq/3dlbfKwv6xztjI7DeBE45QA"
-	portalBaseURL  = "https://w.xidian.edu.cn"
-	portalHost     = "w.xidian.edu.cn"
-	portalDirectIP = "10.255.44.33"
+	acID             = "8"
+	customB64ABC     = "LVoJPiCN2R8G90yg+hmFHuacZ1OWMnrsSTXkYpUq/3dlbfKwv6xztjI7DeBE45QA"
+	portalBaseURL    = "https://w.xidian.edu.cn"
+	portalHost       = "w.xidian.edu.cn"
+	portalDirectIP   = "10.255.44.33"
+	maxPasswordBytes = 4096
 )
 
 type serverTarget struct {
@@ -48,7 +50,8 @@ var servers = []serverTarget{
 
 func main() {
 	usernameFlag := flag.String("u", "", "您的账号 (学号)")
-	passwordFlag := flag.String("p", "", "您的校园网密码")
+	passwordFlag := flag.String("p", "", "您的校园网密码（不推荐，优先使用 --password-stdin）")
+	passwordStdinFlag := flag.Bool("password-stdin", false, "从标准输入读取密码，避免出现在命令参数中")
 	domainFlag := flag.String("d", "", "运营商后缀, 如 @dx, @lt, @yd (默认为校园网)")
 	statusFlag := flag.Bool("s", false, "查询在线状态 (此模式下无需-u和-p)")
 	timeoutFlag := flag.Int("to", 10, "超时时间(秒)") // 考虑是否需要
@@ -61,14 +64,45 @@ func main() {
 	if *statusFlag {
 		checkStatus(ctx)
 	} else {
-		// 检查登录模式下参数是否完整
-		if *usernameFlag == "" || *passwordFlag == "" {
-			fmt.Println("错误: 登录模式下必须提供 -u (账号) 和 -p (密码) 参数。")
-			fmt.Println("用法示例: ./xdsrun -u 你的学号 -p '你的密码'")
+		password, err := readPassword(*passwordFlag, *passwordStdinFlag)
+		if err != nil {
+			fmt.Printf("错误: %v\n", err)
 			os.Exit(1)
 		}
-		performLogin(ctx, *usernameFlag, *passwordFlag, *domainFlag)
+		// 检查登录模式下参数是否完整
+		if *usernameFlag == "" || password == "" {
+			fmt.Println("错误: 登录模式下必须提供 -u，并通过 -p 或 --password-stdin 提供密码。")
+			fmt.Println("推荐用法: ./xdsrun -u 你的学号 --password-stdin")
+			os.Exit(1)
+		}
+		if err := performLogin(ctx, *usernameFlag, password, *domainFlag); err != nil {
+			fmt.Printf("错误: %v\n", err)
+			os.Exit(1)
+		}
 	}
+}
+
+func readPassword(password string, fromStdin bool) (string, error) {
+	return readPasswordFrom(password, fromStdin, os.Stdin)
+}
+
+func readPasswordFrom(password string, fromStdin bool, input io.Reader) (string, error) {
+	if password != "" && fromStdin {
+		return "", errors.New("不能同时使用 -p 和 --password-stdin")
+	}
+	if !fromStdin {
+		return password, nil
+	}
+
+	line, err := bufio.NewReader(io.LimitReader(input, maxPasswordBytes+2)).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("读取密码失败: %w", err)
+	}
+	password = strings.TrimRight(line, "\r\n")
+	if len(password) > maxPasswordBytes {
+		return "", errors.New("密码输入过长")
+	}
+	return password, nil
 }
 
 func createClient(dialIP string) *http.Client {
@@ -102,7 +136,7 @@ func rewritePortalAddress(address, dialIP string) string {
 // ================================================================================= //
 
 // performLogin 执行完整的登录流程
-func performLogin(ctx context.Context, username, password, domain string) {
+func performLogin(ctx context.Context, username, password, domain string) error {
 	fullUsername := username + domain
 	type result struct {
 		label  string
@@ -149,13 +183,13 @@ func performLogin(ctx context.Context, username, password, domain string) {
 		if r.err == nil && !successFound {
 			fmt.Printf("[OK] 通过%s登录成功！IP %q 目前已授权。\n", r.label, r.userIP)
 			cancel()
-			return
+			return nil
 		} else {
 			fmt.Printf("%s失败: %v\n", r.label, r.err)
 		}
 	}
 
-	fmt.Println("错误: 所有服务器均尝试失败，请检查网络。")
+	return errors.New("所有服务器均尝试失败，请检查网络")
 }
 
 // checkStatus 执行在线状态查询流程
@@ -278,7 +312,7 @@ func finalLogin(ctx context.Context, client *http.Client, host, userIP, hmd5, in
 	}
 
 	if !strings.Contains(string(body), "\"error\":\"ok\"") && !strings.Contains(string(body), "\"suc_msg\":\"login_ok\"") {
-		return fmt.Errorf("登录失败，服务器响应: %s", string(body))
+		return errors.New("登录失败：服务器未返回成功状态（响应内容已隐藏，避免认证材料进入日志）")
 	}
 	return nil
 }
@@ -386,16 +420,16 @@ func l(data []uint32) string {
 //                                    辅助工具函数                                     //
 // ================================================================================= //
 
-func makeRequest(ctx context.Context, client *http.Client, url string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+func makeRequest(ctx context.Context, client *http.Client, requestURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", requestURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("构造网络请求失败")
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, sanitizeRequestError(err)
 	}
 	defer resp.Body.Close()
 
@@ -403,4 +437,19 @@ func makeRequest(ctx context.Context, client *http.Client, url string) ([]byte, 
 		return nil, fmt.Errorf("服务器返回非 200 状态码: %d", resp.StatusCode)
 	}
 	return io.ReadAll(resp.Body)
+}
+
+func sanitizeRequestError(err error) error {
+	op := "网络"
+	for {
+		var urlErr *url.Error
+		if !errors.As(err, &urlErr) {
+			break
+		}
+		if urlErr.Op != "" {
+			op = urlErr.Op
+		}
+		err = urlErr.Err
+	}
+	return fmt.Errorf("%s 请求失败: %v", op, err)
 }

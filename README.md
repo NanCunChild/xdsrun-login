@@ -53,18 +53,28 @@
 
 #### 登录认证
 
-使用 -u 指定账号，-p 指定密码。如果密码包含特殊字符，请用单引号 ' ' 将其包围。
+使用 `-u` 指定账号。推荐通过 `--password-stdin` 从标准输入读取密码，避免明文密码出现在 Shell 历史或进程参数中。
 
-```Bash
-# 基本用法
-./xdsrun -u 你的学号 -p 你的密码
+Linux / macOS（Bash 或 Zsh）：
 
-# 密码包含特殊字符的用法
-./xdsrun -u 23000000000 -p 'password@!#$'
-
-# 如果需要指定运营商（例如电信），使用 -d 参数
-./xdsrun -u 你的学号 -p 你的密码 -d @dx
+```bash
+printf "校园网密码: "
+IFS= read -r -s XDSRUN_PASSWORD
+printf "\n"
+printf "%s\n" "$XDSRUN_PASSWORD" | ./xdsrun -u 你的学号 --password-stdin
+unset XDSRUN_PASSWORD
 ```
+
+Windows PowerShell 7+：
+
+```powershell
+$securePassword = Read-Host "校园网密码" -AsSecureString
+$plainPassword = [Net.NetworkCredential]::new("", $securePassword).Password
+$plainPassword | .\xdsrun.exe -u 你的学号 --password-stdin
+Remove-Variable plainPassword
+```
+
+如果需要指定运营商（例如电信），在命令末尾加上 `-d @dx`。`-p` 参数仍保留以兼容旧用法，但不推荐在共享或多用户设备上使用。
 
 成功后，程序会提示 `IP "xxx.xxx.xxx.xxx" 已授权！` 。
 
