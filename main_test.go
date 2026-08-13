@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -49,5 +52,42 @@ func TestRewritePortalAddress(t *testing.T) {
 	}
 	if got := rewritePortalAddress("example.com:443", "w.xidian.edu.cn", defaultPortalDirectIP); got != "example.com:443" {
 		t.Fatalf("rewritePortalAddress() changed an unrelated address to %q", got)
+	}
+}
+
+func TestAcquirePasswordUsesProvidedValue(t *testing.T) {
+	password, err := acquirePassword("secret", 0, func(int) bool { return false }, nil, nil)
+	if err != nil || password != "secret" {
+		t.Fatalf("acquirePassword() = %q, %v", password, err)
+	}
+}
+
+func TestAcquirePasswordReadsFromTerminalWithoutEcho(t *testing.T) {
+	var prompt bytes.Buffer
+	password, err := acquirePassword("", 42, func(fd int) bool { return fd == 42 }, func(fd int) ([]byte, error) {
+		return []byte("secret"), nil
+	}, &prompt)
+	if err != nil || password != "secret" {
+		t.Fatalf("acquirePassword() = %q, %v", password, err)
+	}
+	if got := prompt.String(); got != "请输入校园网密码: \n" {
+		t.Fatalf("prompt = %q", got)
+	}
+}
+
+func TestAcquirePasswordRejectsNonTerminal(t *testing.T) {
+	_, err := acquirePassword("", 0, func(int) bool { return false }, nil, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), envPassword) {
+		t.Fatalf("acquirePassword() error = %v", err)
+	}
+}
+
+func TestAcquirePasswordReportsReadError(t *testing.T) {
+	want := errors.New("read failed")
+	_, err := acquirePassword("", 0, func(int) bool { return true }, func(int) ([]byte, error) {
+		return nil, want
+	}, &bytes.Buffer{})
+	if !errors.Is(err, want) {
+		t.Fatalf("acquirePassword() error = %v", err)
 	}
 }

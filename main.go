@@ -22,6 +22,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 const (
@@ -29,6 +31,11 @@ const (
 	customB64ABC          = "LVoJPiCN2R8G90yg+hmFHuacZ1OWMnrsSTXkYpUq/3dlbfKwv6xztjI7DeBE45QA"
 	defaultPortalURL      = "https://w.xidian.edu.cn"
 	defaultPortalDirectIP = "10.255.44.33"
+	envUsername           = "XDSRUN_USERNAME"
+	envPassword           = "XDSRUN_PASSWORD"
+	envDomain             = "XDSRUN_DOMAIN"
+	envPortal             = "XDSRUN_PORTAL"
+	envPortalIP           = "XDSRUN_PORTAL_IP"
 )
 
 type serverTarget struct {
@@ -41,13 +48,13 @@ type serverTarget struct {
 // ================================================================================= //
 
 func main() {
-	usernameFlag := flag.String("u", "", "您的账号 (学号)")
-	passwordFlag := flag.String("p", "", "您的校园网密码")
-	domainFlag := flag.String("d", "", "运营商后缀, 如 @dx, @lt, @yd (默认为校园网)")
+	usernameFlag := flag.String("u", os.Getenv(envUsername), "您的账号 (学号)")
+	passwordFlag := flag.String("p", os.Getenv(envPassword), "您的校园网密码")
+	domainFlag := flag.String("d", os.Getenv(envDomain), "运营商后缀, 如 @dx, @lt, @yd (默认为校园网)")
 	statusFlag := flag.Bool("s", false, "查询在线状态 (此模式下无需-u和-p)")
 	timeoutFlag := flag.Int("to", 10, "超时时间(秒)") // 考虑是否需要
-	portalFlag := flag.String("portal", defaultPortalURL, "认证 Portal 地址 (其他学校仅提供 best-effort 支持)")
-	portalIPFlag := flag.String("portal-ip", "", "绕过 DNS 直连的 Portal IP")
+	portalFlag := flag.String("portal", envOrDefault(envPortal, defaultPortalURL), "认证 Portal 地址 (其他学校仅提供 best-effort 支持)")
+	portalIPFlag := flag.String("portal-ip", os.Getenv(envPortalIP), "绕过 DNS 直连的 Portal IP")
 	var insecure bool
 	flag.BoolVar(&insecure, "k", false, "允许证书错误 (不安全)")
 	flag.BoolVar(&insecure, "insecure", false, "允许证书错误 (不安全)")
@@ -71,21 +78,53 @@ func main() {
 		targets = append(targets, serverTarget{name: portalIP, dialIP: portalIP})
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutFlag)*time.Second)
-	defer cancel()
-
 	// 如果带有 -s 参数，则执行状态查询
 	if *statusFlag {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutFlag)*time.Second)
+		defer cancel()
 		checkStatus(ctx, portalURL, portalHost, targets, insecure)
 	} else {
-		// 检查登录模式下参数是否完整
-		if *usernameFlag == "" || *passwordFlag == "" {
-			fmt.Println("错误: 登录模式下必须提供 -u (账号) 和 -p (密码) 参数。")
-			fmt.Println("用法示例: ./xdsrun -u 你的学号 -p '你的密码'")
+		if *usernameFlag == "" {
+			fmt.Printf("错误: 登录模式下必须通过 -u 或 %s 提供账号。\n", envUsername)
 			os.Exit(1)
 		}
-		performLogin(ctx, portalURL, portalHost, targets, insecure, *usernameFlag, *passwordFlag, *domainFlag)
+		password, err := acquirePassword(*passwordFlag, int(os.Stdin.Fd()), term.IsTerminal, term.ReadPassword, os.Stderr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+			os.Exit(1)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutFlag)*time.Second)
+		defer cancel()
+		performLogin(ctx, portalURL, portalHost, targets, insecure, *usernameFlag, password, *domainFlag)
 	}
+}
+
+func envOrDefault(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func acquirePassword(password string, stdinFD int, isTerminal func(int) bool, readPassword func(int) ([]byte, error), prompt io.Writer) (string, error) {
+	if password != "" {
+		return password, nil
+	}
+	if !isTerminal(stdinFD) {
+		return "", fmt.Errorf("未提供密码且标准输入不是可交互终端；请使用 -p 或 %s", envPassword)
+	}
+	if _, err := fmt.Fprint(prompt, "请输入校园网密码: "); err != nil {
+		return "", err
+	}
+	value, err := readPassword(stdinFD)
+	fmt.Fprintln(prompt)
+	if err != nil {
+		return "", fmt.Errorf("读取密码失败: %w", err)
+	}
+	if len(value) == 0 {
+		return "", errors.New("密码不能为空")
+	}
+	return string(value), nil
 }
 
 func parsePortalURL(rawURL string) (string, string, error) {
