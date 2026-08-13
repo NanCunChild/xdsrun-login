@@ -13,10 +13,10 @@
 
 ## 功能特性
 
-- **🚀 跨平台支持**: 可在 `Windows`, `Linux`, `macOS` 等操作系统及 `x86`, `ARMv7`, `ARMv8 (aarch64)`, `MIPS`, `RISC-V`, `LoongArch` 等多种架构上运行。
-- **💻 纯命令行接口**: 简单直观的参数，易于集成到开机自启脚本或自动化流程中。
-- **📊 状态查询**: 可随时查询当前网络的在线状态、已用流量、时长和余额等信息。
-- **🌐 并行请求处理**: 当主认证域名 (`w.xidian.edu.cn`) 与IP地址 (`10.255.44.33`) 同时进行连接，增强稳定性。
+- **跨平台支持**: 可在 `Windows`, `Linux`, `macOS` 等操作系统及 `x86`, `ARMv7`, `ARMv8 (aarch64)`, `MIPS`, `RISC-V`, `LoongArch` 等多种架构上运行。
+- **纯命令行接口**: 简单直观的参数，易于集成到开机自启脚本或自动化流程中。
+- **状态查询**: 可随时查询当前网络的在线状态、已用流量、时长和余额等信息。
+- **并行请求处理**: 当主认证域名 (`w.xidian.edu.cn`) 与IP地址 (`10.255.44.33`) 同时进行连接，增强稳定性。
 
 ## 开发历程与技术挑战
 
@@ -38,7 +38,7 @@
 
 - Windows (64位): `xdsrun_x.x.x_windows_amd64.zip`
 - Linux (64位): `xdsrun_x.x.x_linux_amd64.tar.gz`
-- 树莓派 (ARMv8/aarch64): `xdsrun_x.x.x_linux_arm64.tar.gz`
+- 树莓派等arm Linux设备 (ARMv8/aarch64): `xdsrun_x.x.x_linux_arm64.tar.gz`
 
 ### 2. 准备运行
 
@@ -67,6 +67,18 @@
 ```
 
 成功后，程序会提示 `IP "xxx.xxx.xxx.xxx" 已授权！` 。
+
+程序默认同时尝试通过 `w.xidian.edu.cn` 和固定 IP `10.255.44.33` 连接认证服务。固定 IP 通道只绕过 DNS 解析，HTTPS 请求仍使用域名进行证书校验。
+
+如果校园网认证服务存在证书错误，可显式添加 `-k` 或 `--insecure` 忽略证书校验。该选项会降低连接安全性，仅应在确认认证服务可信时使用。
+
+其他学校可尝试通过 `--portal` 覆盖认证地址，并按需用 `--portal-ip` 指定绕过 DNS 的地址：
+
+```bash
+./xdsrun -u 你的账号 -p '你的密码' --portal https://portal.example.edu --portal-ip 192.0.2.10
+```
+
+此配置仅提供 best-effort 兼容；程序仍固定使用西电当前采用的 `ac_id=8` 和认证协议，不承诺适配其他学校的 Portal 实现。
 
 #### 查询在线状态
 
@@ -104,7 +116,7 @@ GOOS=linux GOARCH=arm64 go build -o xdsrun-linux-arm64 .
 ## 致谢
 
 特别感谢这位逆向的同学，精准地指出了项目中最核心的XXTEA算法变体问题，没有他的帮助，这个项目将难以完成。
-同时也感谢一下NCC~ 如果喜欢这个项目，那就给NCC打个星星吧~
+同时也感谢一下NCC自己~ 如果喜欢这个项目，那就给NCC打个星星吧~
 
 ## 参考
 
