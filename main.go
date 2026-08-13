@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,11 +25,16 @@ import (
 )
 
 const (
-	acID         = "8"
-	customB64ABC = "LVoJPiCN2R8G90yg+hmFHuacZ1OWMnrsSTXkYpUq/3dlbfKwv6xztjI7DeBE45QA"
+	acID                  = "8"
+	customB64ABC          = "LVoJPiCN2R8G90yg+hmFHuacZ1OWMnrsSTXkYpUq/3dlbfKwv6xztjI7DeBE45QA"
+	defaultPortalURL      = "https://w.xidian.edu.cn"
+	defaultPortalDirectIP = "10.255.44.33"
 )
 
-var servers = []string{"https://w.xidian.edu.cn", "https://10.255.44.33"}
+type serverTarget struct {
+	name   string
+	dialIP string
+}
 
 // ================================================================================= //
 //                                    主程序入口                                      //
@@ -40,16 +46,37 @@ func main() {
 	domainFlag := flag.String("d", "", "运营商后缀, 如 @dx, @lt, @yd (默认为校园网)")
 	statusFlag := flag.Bool("s", false, "查询在线状态 (此模式下无需-u和-p)")
 	timeoutFlag := flag.Int("to", 10, "超时时间(秒)") // 考虑是否需要
+	portalFlag := flag.String("portal", defaultPortalURL, "认证 Portal 地址 (其他学校仅提供 best-effort 支持)")
+	portalIPFlag := flag.String("portal-ip", "", "绕过 DNS 直连的 Portal IP")
+	var insecure bool
+	flag.BoolVar(&insecure, "k", false, "允许证书错误 (不安全)")
+	flag.BoolVar(&insecure, "insecure", false, "允许证书错误 (不安全)")
 	flag.Parse()
 
-	client := createClient(true)
+	portalURL, portalHost, err := parsePortalURL(*portalFlag)
+	if err != nil {
+		fmt.Printf("错误: %v\n", err)
+		os.Exit(1)
+	}
+	portalIP := *portalIPFlag
+	if portalIP == "" && portalURL == defaultPortalURL {
+		portalIP = defaultPortalDirectIP
+	}
+	if portalIP != "" && net.ParseIP(portalIP) == nil {
+		fmt.Println("错误: --portal-ip 必须是有效的 IP 地址。")
+		os.Exit(1)
+	}
+	targets := []serverTarget{{name: portalHost}}
+	if portalIP != "" {
+		targets = append(targets, serverTarget{name: portalIP, dialIP: portalIP})
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*timeoutFlag)*time.Second)
 	defer cancel()
 
 	// 如果带有 -s 参数，则执行状态查询
 	if *statusFlag {
-		checkStatus(ctx, client)
+		checkStatus(ctx, portalURL, portalHost, targets, insecure)
 	} else {
 		// 检查登录模式下参数是否完整
 		if *usernameFlag == "" || *passwordFlag == "" {
@@ -57,15 +84,35 @@ func main() {
 			fmt.Println("用法示例: ./xdsrun -u 你的学号 -p '你的密码'")
 			os.Exit(1)
 		}
-		performLogin(ctx, client, *usernameFlag, *passwordFlag, *domainFlag)
+		performLogin(ctx, portalURL, portalHost, targets, insecure, *usernameFlag, *passwordFlag, *domainFlag)
 	}
 }
 
-func createClient(skipVerify bool) *http.Client {
+func parsePortalURL(rawURL string) (string, string, error) {
+	parsed, err := url.Parse(strings.TrimRight(rawURL, "/"))
+	if err != nil || parsed.Scheme == "" || parsed.Hostname() == "" {
+		return "", "", errors.New("--portal 必须是有效的 HTTP 或 HTTPS 地址")
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", "", errors.New("--portal 仅支持 HTTP 或 HTTPS 地址")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", "", errors.New("--portal 不能包含查询参数或片段")
+	}
+	return parsed.String(), parsed.Hostname(), nil
+}
+
+func createClient(portalHost, dialIP string, insecure bool) *http.Client {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: skipVerify,
+			InsecureSkipVerify: insecure,
 		},
+	}
+	if dialIP != "" {
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, rewritePortalAddress(address, portalHost, dialIP))
+		}
 	}
 	return &http.Client{
 		Timeout:   5 * time.Second,
@@ -73,12 +120,20 @@ func createClient(skipVerify bool) *http.Client {
 	}
 }
 
+func rewritePortalAddress(address, portalHost, dialIP string) string {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || !strings.EqualFold(host, portalHost) {
+		return address
+	}
+	return net.JoinHostPort(dialIP, port)
+}
+
 // ================================================================================= //
 //                                 主要业务流程                                      //
 // ================================================================================= //
 
 // performLogin 执行完整的登录流程
-func performLogin(ctx context.Context, client *http.Client, username, password, domain string) {
+func performLogin(ctx context.Context, portalURL, portalHost string, targets []serverTarget, insecure bool, username, password, domain string) {
 	fullUsername := username + domain
 	type result struct {
 		host   string
@@ -89,37 +144,38 @@ func performLogin(ctx context.Context, client *http.Client, username, password, 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	results := make(chan result, len(servers))
+	results := make(chan result, len(targets))
 
-	for _, host := range servers {
-		go func(host string) {
+	for _, target := range targets {
+		go func(target serverTarget) {
+			client := createClient(portalHost, target.dialIP, insecure)
 			select {
 			case <-ctx.Done():
-				results <- result{host: host, err: ctx.Err()}
+				results <- result{host: target.name, err: ctx.Err()}
 				return
 			default:
 			}
 
-			userIP, err := getIpAddress(ctx, client, host)
+			userIP, err := getIpAddress(ctx, client, portalURL)
 			if err != nil {
-				results <- result{host: host, err: err}
+				results <- result{host: target.name, err: err}
 				return
 			}
-			token, err := getChallengeToken(ctx, client, host, userIP, fullUsername)
+			token, err := getChallengeToken(ctx, client, portalURL, userIP, fullUsername)
 			if err != nil {
-				results <- result{host: host, err: err}
+				results <- result{host: target.name, err: err}
 				return
 			}
 			hmd5 := calculateHmacMD5(password, token)
 			info := encodeUserInfo(userIP, fullUsername, password, token)
 			chksum := calculateChecksum(token, userIP, hmd5, info, fullUsername)
-			err = finalLogin(ctx, client, host, userIP, hmd5, info, chksum, fullUsername)
-			results <- result{host: host, userIP: userIP, err: err}
-		}(host)
+			err = finalLogin(ctx, client, portalURL, userIP, hmd5, info, chksum, fullUsername)
+			results <- result{host: target.name, userIP: userIP, err: err}
+		}(target)
 	}
 
 	successFound := false
-	for i := 0; i < len(servers); i++ {
+	for i := 0; i < len(targets); i++ {
 		r := <-results
 		if r.err == nil && !successFound {
 			fmt.Printf("[OK] 登录到 %q 成功！ IP %q 目前已授权！\n", r.host, r.userIP)
@@ -134,24 +190,25 @@ func performLogin(ctx context.Context, client *http.Client, username, password, 
 }
 
 // checkStatus 执行在线状态查询流程
-func checkStatus(ctx context.Context, client *http.Client) {
+func checkStatus(ctx context.Context, portalURL, portalHost string, targets []serverTarget, insecure bool) {
 	var success bool
-	for _, host := range servers {
-		fmt.Printf("正在尝试连接服务器: %s ...\n", host)
+	for _, target := range targets {
+		client := createClient(portalHost, target.dialIP, insecure)
+		fmt.Printf("正在尝试连接服务器: %s ...\n", target.name)
 
-		userIP, err := getIpAddress(ctx, client, host)
+		userIP, err := getIpAddress(ctx, client, portalURL)
 		if err != nil {
-			fmt.Printf("从 %s 获取IP失败: %v\n", host, err)
+			fmt.Printf("从 %s 获取IP失败: %v\n", target.name, err)
 			continue
 		}
 
 		// 构造查询URL
 		callback := fmt.Sprintf("jQuery11240%d_%d", time.Now().Unix(), time.Now().UnixNano()%1000)
-		apiURL := fmt.Sprintf("%s/cgi-bin/rad_user_info?callback=%s&ip=%s&_=%d", host, callback, userIP, time.Now().UnixMilli())
+		apiURL := fmt.Sprintf("%s/cgi-bin/rad_user_info?callback=%s&ip=%s&_=%d", portalURL, callback, userIP, time.Now().UnixMilli())
 
 		respBody, err := makeRequest(ctx, client, apiURL)
 		if err != nil {
-			fmt.Printf("向 %s 查询状态失败: %v\n", host, err)
+			fmt.Printf("向 %s 查询状态失败: %v\n", target.name, err)
 			continue
 		}
 
@@ -161,7 +218,7 @@ func checkStatus(ctx context.Context, client *http.Client) {
 
 		var statusInfo map[string]interface{}
 		if err := json.Unmarshal([]byte(jsonStr), &statusInfo); err != nil {
-			fmt.Printf("解析来自 %s 的状态信息失败: %v\n", host, err)
+			fmt.Printf("解析来自 %s 的状态信息失败: %v\n", target.name, err)
 			continue
 		}
 
